@@ -297,10 +297,11 @@ function post_install(){
         fi
         rc-update add sshd default
         rc-update add networking default 2>/dev/null
-        rc-update add networking boot 2>/dev/null
         rc-update add hostname boot 2>/dev/null
-        rc-update add mdev sysinit
-        rc-update add devfs sysinit
+        # NOTE: do NOT add mdev/devfs to sysinit on LXC. The linuxcontainers
+        # template ships with sysinit empty and devfs in boot (the LXC host
+        # manages /dev); `mdev -s` inside a container walks the whole host
+        # sysfs and can wedge OpenRC at sysinit -> nothing ever starts.
         sed -i 's/--auto/-a/' /etc/init.d/networking 2>/dev/null # fix bug in networking script of lxc
     elif [ -e /etc/debian_version ] || grep -qi debian /etc/issue 2>/dev/null; then
         install ssh
