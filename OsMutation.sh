@@ -235,10 +235,15 @@ function chroot_run(){
 function replace_os(){
     mkdir /x/oldroot
     mount --bind / /x/oldroot
+    # move the new rootfs over piece by piece: purge any leftover dir of the
+    # same name in /oldroot first, otherwise busybox mv chokes on e.g. the
+    # old /root and aborts halfway
     if chroot_run 'cd /oldroot; '`
         `'rm -rf $(ls /oldroot | grep -vE "(^dev|^proc|^sys|^run|^x)") ; '`
         `'cd /; '`
-        `'mv -f $(ls / | grep -vE "(^dev|^proc|^sys|^run|^oldroot)") /oldroot'; then
+        `'for f in $(ls / | grep -vE "(^dev|^proc|^sys|^run|^oldroot)"); do '`
+        `'rm -rf "/oldroot/$f" 2>/dev/null; '`
+        `'mv -f "/$f" "/oldroot/$f" || exit 1; done'; then
         umount /x/oldroot
     else
         umount /x/oldroot 2>/dev/null
@@ -331,3 +336,6 @@ function main(){
 }
 
 main 2>&1 | tee reinstall.log
+# propagate the real exit code through the pipe (tee would otherwise mask
+# every FATAL exit with 0 and callers would reboot into a half-installed box)
+exit ${PIPESTATUS[0]}
