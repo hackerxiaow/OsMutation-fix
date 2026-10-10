@@ -34,6 +34,9 @@ function read_virt_tech(){
     cttype=$(virt-what | sed -n 1p)
     if [[ $cttype == "lxc" || $cttype == "openvz" ]]; then
         [[ $cttype == "lxc" ]] && echo -e '\e[1;33mYour container type: lxc\e[m' || echo -e '\e[1;33mYour container type: openvz\e[m'
+    elif [ -n "$VIRT_TYPE" ]; then
+        cttype=$VIRT_TYPE
+        echo -e "\e[1;33mYour container type (from VIRT_TYPE): $cttype\e[m"
     else
         while [ "$cttype" != 'lxc' -a "$cttype" != 'openvz' -a "$cttype" != 'kvm' ] ; do
             echo -ne "\e[1;33mplease input container type (lxc/openvz/kvm):\e[m"
@@ -77,6 +80,7 @@ function read_lxc_template(){
         echo "$os_list" | nl
 
         while [ -z "${os_index##*[!0-9]*}" ]; do
+            if [ -n "$OS_INDEX" ]; then os_index=$OS_INDEX; break; fi
             echo -ne "\e[1;33mplease select os (input number):\e[m"
             read os_index < /dev/tty
         done
@@ -98,6 +102,7 @@ function read_lxc_template(){
         echo "$os_list" | nl
 
         while [ -z "${os_index##*[!0-9]*}" ]; do
+            if [ -n "$OS_INDEX" ]; then os_index=$OS_INDEX; break; fi
             echo -ne "\e[1;33mplease select os (input number):\e[m"
             read os_index < /dev/tty
         done
@@ -123,52 +128,74 @@ function migrate_configuration(){
     [ -d /root/.ssh ] && cp -a /root/.ssh /x/root/
     [ -f /etc/hostname ] && cp -f /etc/hostname /x/etc/hostname
 
-    # detect default interface, ipv4 and gateway from the *running* system
-    dev=$(awk '$2 == 00000000 { print $1 }' /proc/net/route | head -n 1)
+    # detect interface/gateways from the *running* system. On ipv6-only boxes
+    # (e.g. EUServ free VPS) /proc/net/route has no default route, so try the
+    # ipv6 default route first -- it is the path we are actually connected by.
+    dev=$(ip -6 route show default 2>/dev/null | sed -nE 's/.*dev ([^ ]+).*/\1/p' | head -n 1)
     [ -n "$dev" ] || dev=$(ip -4 route show default 2>/dev/null | sed -nE 's/.*dev ([^ ]+).*/\1/p' | head -n 1)
+    [ -n "$dev" ] || dev=$(awk '$2 == 00000000 { print $1 }' /proc/net/route 2>/dev/null | head -n 1)
     [ -n "$dev" ] || dev=eth0
 
     ipaddr_with_mask=$(ip -4 addr show dev "$dev" 2>/dev/null | sed -nE 's/.*inet ([0-9.]+\/[0-9]+).*/\1/p' | head -n 1)
-    gateway=$(ip -4 route show default 2>/dev/null | sed -nE 's/.*via ([0-9.]+).*/\1/p' | head -n 1)
-    echo -e "\e[1;33mnet migration: dev=$dev addr=$ipaddr_with_mask gw=$gateway\e[m"
+    gateway4=$(ip -4 route show default 2>/dev/null | sed -nE 's/.*via ([0-9.]+).*/\1/p' | head -n 1)
+    addr6=$(ip -6 addr show dev "$dev" scope global 2>/dev/null | grep -vi temporary | sed -nE 's/.*inet6 ([0-9a-fA-F:]+\/[0-9]+).*/\1/p' | head -n 1)
+    gw6=$(ip -6 route show default 2>/dev/null | sed -nE 's/.*via ([0-9a-fA-F:]+).*/\1/p' | head -n 1)
+    echo -e "\e[1;33mnet migration: dev=$dev v4=$ipaddr_with_mask gw4=$gateway4 v6=$addr6 gw6=$gw6\e[m"
 
     [ -d /x/etc/network/ ] || mkdir -p /x/etc/network/
 
-    if [ -n "$ipaddr_with_mask" ] && [ -n "$gateway" ]; then
-        # static: use the standard `gateway` line understood by both ifupdown
-        # and ifupdown-ng. NEVER write a top-level `hostname` line here: the
-        # Alpine ifupdown-ng parser chokes on it and networking fails to start.
+    # ipv4 stanza: static if we can, manual (link up, no address) on ipv6-only
+    if [ -n "$ipaddr_with_mask" ] && [ -n "$gateway4" ]; then
         prefix=${ipaddr_with_mask##*/}
         if [ "$prefix" = "32" ]; then
-            gw_line="up ip route add default via $gateway dev $dev onlink"
-        else
-            gw_line="gateway $gateway"
-        fi
-        cat > /x/etc/network/interfaces << EOF
-auto lo
-iface lo inet loopback
-
-auto $dev
-iface $dev inet static
+            v4_block="iface $dev inet static
 address $ipaddr_with_mask
-$gw_line
-EOF
+up ip route add default via $gateway4 dev $dev onlink"
+        else
+            v4_block="iface $dev inet static
+address $ipaddr_with_mask
+gateway $gateway4"
+        fi
+    elif [ -n "$ipaddr_with_mask" ]; then
+        v4_block="iface $dev inet static
+address $ipaddr_with_mask"
     else
-        # fallback: dhcp (EUServ and many free VPS providers hand out config via dhcp)
-        cat > /x/etc/network/interfaces << EOF
-auto lo
-iface lo inet loopback
-
-auto $dev
-iface $dev inet dhcp
-EOF
+        v4_block="iface $dev inet manual"
     fi
+
+    # ipv6 stanza: EUServ hands out a static /128 with an ULA gateway, so copy
+    # the running config verbatim; `up` line keeps the explicit dev so ULA or
+    # link-local gateways both work
+    if [ -n "$addr6" ]; then
+        if [ -n "$gw6" ]; then
+            v6_block="iface $dev inet6 static
+address $addr6
+up ip -6 route replace default via $gw6 dev $dev"
+        else
+            v6_block="iface $dev inet6 auto"
+        fi
+    else
+        v6_block=""
+    fi
+
+    {
+        echo "auto lo"
+        echo "iface lo inet loopback"
+        echo ""
+        echo "auto $dev"
+        echo "$v4_block"
+        [ -n "$v6_block" ] && { echo ""; echo "$v6_block"; }
+    } > /x/etc/network/interfaces
+    echo -e "\e[1;33m--- generated /etc/network/interfaces ---\e[m"
+    cat /x/etc/network/interfaces
+    echo -e "\e[1;33m-----------------------------------------\e[m"
 
     rm -f /x/etc/resolv.conf
     cat > /x/etc/resolv.conf << EOF
-nameserver 8.8.8.8
-nameserver 1.1.1.1
+nameserver 2606:4700:4700::1111
 nameserver 2001:4860:4860::8888
+nameserver 1.1.1.1
+nameserver 8.8.8.8
 EOF
 }
 
