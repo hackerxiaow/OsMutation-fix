@@ -279,14 +279,21 @@ function post_install(){
         }
         # syntax-check the generated interfaces with ifupdown-ng itself:
         # an unparsable interfaces file is exactly what bricked ipv6-only
-        # boxes before (networking fails -> no address -> lost ssh)
+        # boxes before (networking fails -> no address -> lost ssh).
+        # --check only exists in newer ifupdown-ng; fall back to a plain parse.
         if command -v ifquery >/dev/null 2>&1; then
-            if ! ifquery -i /etc/network/interfaces -c -a >/dev/null 2>&1; then
+            if ifquery -i /etc/network/interfaces -c -a >/dev/null 2>&1; then
+                echo -e '\e[1;32m[alpine] interfaces syntax check passed\e[m'
+            elif ifquery --help 2>&1 | grep -qe -- '--check'; then
                 echo -e '\e[1;41m[alpine] FATAL: /etc/network/interfaces syntax check failed. DO NOT REBOOT. Details:\e[m'
                 ifquery -i /etc/network/interfaces -c -a 2>&1 | head -20
                 exit 1
+            elif ! ifquery -i /etc/network/interfaces lo >/dev/null 2>&1; then
+                echo -e '\e[1;41m[alpine] FATAL: interfaces parse check failed. DO NOT REBOOT.\e[m'
+                exit 1
+            else
+                echo -e '\e[1;32m[alpine] interfaces parse check passed (ifupdown-ng without --check)\e[m'
             fi
-            echo -e '\e[1;32m[alpine] interfaces syntax check passed\e[m'
         fi
         rc-update add sshd default
         rc-update add networking default 2>/dev/null
