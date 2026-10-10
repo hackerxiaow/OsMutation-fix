@@ -174,7 +174,9 @@ gateway $gateway4"
         v4_block="iface $dev inet static
 address $ipaddr_with_mask"
     else
-        v4_block="iface $dev inet manual"
+        # ipv6-only: no v4 stanza at all (ifupdown-ng brings the link up for
+        # the inet6 block anyway; a `manual` block is one more moving part)
+        v4_block=""
     fi
 
     # ipv6 stanza: EUServ hands out a static /128 with an ULA gateway, so copy
@@ -197,8 +199,8 @@ up ip -6 route replace default via $gw6 dev $dev"
         echo "iface lo inet loopback"
         echo ""
         echo "auto $dev"
-        echo "$v4_block"
-        [ -n "$v6_block" ] && { echo ""; echo "$v6_block"; }
+        [ -n "$v4_block" ] && { echo "$v4_block"; echo ""; }
+        [ -n "$v6_block" ] && echo "$v6_block"
     } > /x/etc/network/interfaces
     echo -e "\e[1;33m--- generated /etc/network/interfaces ---\e[m"
     cat /x/etc/network/interfaces
@@ -235,15 +237,15 @@ function chroot_run(){
 function replace_os(){
     mkdir /x/oldroot
     mount --bind / /x/oldroot
-    # move the new rootfs over piece by piece: purge any leftover dir of the
-    # same name in /oldroot first, otherwise busybox mv chokes on e.g. the
-    # old /root and aborts halfway
+    # purge leftover dirs of the same name first (e.g. an old /root makes
+    # busybox mv abort), then move the new rootfs over in ONE mv invocation:
+    # a per-item loop would exec /bin/mv again after /bin itself is moved
+    # away, killing every subsequent iteration.
     if chroot_run 'cd /oldroot; '`
         `'rm -rf $(ls /oldroot | grep -vE "(^dev|^proc|^sys|^run|^x)") ; '`
         `'cd /; '`
-        `'for f in $(ls / | grep -vE "(^dev|^proc|^sys|^run|^oldroot)"); do '`
-        `'rm -rf "/oldroot/$f" 2>/dev/null; '`
-        `'mv -f "/$f" "/oldroot/$f" || exit 1; done'; then
+        `'for f in $(ls / | grep -vE "(^dev|^proc|^sys|^run|^oldroot)"); do rm -rf "/oldroot/$f" 2>/dev/null; done ; '`
+        `'mv -f $(ls / | grep -vE "(^dev|^proc|^sys|^run|^oldroot)") /oldroot'; then
         umount /x/oldroot
     else
         umount /x/oldroot 2>/dev/null
@@ -275,6 +277,17 @@ function post_install(){
             echo -e '\e[1;41m[alpine] FATAL: sshd missing after install. DO NOT REBOOT.\e[m'
             exit 1
         }
+        # syntax-check the generated interfaces with ifupdown-ng itself:
+        # an unparsable interfaces file is exactly what bricked ipv6-only
+        # boxes before (networking fails -> no address -> lost ssh)
+        if command -v ifquery >/dev/null 2>&1; then
+            if ! ifquery -i /etc/network/interfaces -c -a >/dev/null 2>&1; then
+                echo -e '\e[1;41m[alpine] FATAL: /etc/network/interfaces syntax check failed. DO NOT REBOOT. Details:\e[m'
+                ifquery -i /etc/network/interfaces -c -a 2>&1 | head -20
+                exit 1
+            fi
+            echo -e '\e[1;32m[alpine] interfaces syntax check passed\e[m'
+        fi
         rc-update add sshd default
         rc-update add networking default 2>/dev/null
         rc-update add networking boot 2>/dev/null
