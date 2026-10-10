@@ -67,9 +67,9 @@ function install(){
 }
 
 function read_lxc_template(){
-    last_lxc_version=$(curl -Ls "https://api.github.com/repos/LloydAsp/OsMutation/releases/latest" | grep "LXC" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    last_lxc_version=$(curl -Ls -m 10 "https://api.github.com/repos/LloydAsp/OsMutation/releases/latest" | grep "LXC" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
     if [[ -n $last_lxc_version ]]; then
-        image_list=$(curl -Ls "https://api.github.com/repos/LloydAsp/OsMutation/releases/latest" | grep "LXC" | grep '"browser_download_url":' | sed -E 's/.*"([^"]+)".*/\1/')
+        image_list=$(curl -Ls -m 10 "https://api.github.com/repos/LloydAsp/OsMutation/releases/latest" | grep "LXC" | grep '"browser_download_url":' | sed -E 's/.*"([^"]+)".*/\1/')
         if [ "$(uname -m)" == "aarch64" ] ; then
             image_list="$(echo "$image_list" | grep arm64)"
         else
@@ -88,14 +88,18 @@ function read_lxc_template(){
         download_link=$(echo "$image_list" | head -n $os_index | tail -n 1)
     else
         server=http://images.linuxcontainers.org
-        path=$(wget -qO- ${server}/meta/1.0/index-system | \
+        path=$(wget -qO- --timeout=60 ${server}/meta/1.0/index-system | \
             grep -v edge | grep default | \
             awk '-F;' '(( $1=="debian" || $1=="centos" || $1=="alpine") && ( $3=="amd64" || $3=="i386")) {print $NF}')
 
+        # NOTE: "$path" must stay quoted here -- unquoted echo collapses the
+        # list into ONE line (word splitting) and the sed below then builds a
+        # broken download URL. This exact bug is what killed ipv6-only EUServ
+        # boxes where the github api branch always fails.
         if [ "$(uname -m)" == "aarch64" ] ; then
-            path="$(echo $path | grep arm64)"
+            path="$(echo "$path" | grep arm64)"
         else
-            path="$(echo $path | grep -v arm64)"
+            path="$(echo "$path" | grep -v arm64)"
         fi
 
         os_list=$( echo "$path" | sed -E 's%/images/(.*)/default/.*/%\1%g' | sed 's%/%-%g' )
@@ -118,7 +122,17 @@ function download_rootfs(){
     rm -rf /x 2>/dev/null
     cd /
     mkdir /x
-    wget -qO- $download_link | tar -C /x -xJv
+    if [ -n "$download_link" ]; then
+        wget -qO- --timeout=60 "$download_link" | tar -C /x -xJv
+    else
+        echo -e '\e[1;41mFATAL: no download_link resolved. ABORT, DO NOT REBOOT.\e[m'
+        exit 1
+    fi
+    # hard stop if the template did not land: never continue with an empty /x
+    [ -e /x/etc ] && [ -e /x/bin ] || {
+        echo -e '\e[1;41mFATAL: template download/extract failed (/x is empty). ABORT, DO NOT REBOOT. Old system untouched.\e[m'
+        exit 1
+    }
 }
 
 function migrate_configuration(){
@@ -201,7 +215,7 @@ EOF
 
 function install_requirement(){
     # prevent no access on ipv6 only vps
-    ping -c 3 api.github.com || echo "nameserver 2a00:1098:2c::1"  >  /etc/resolv.conf
+    ping -c 3 api.github.com || echo "nameserver 2606:4700:4700::1111"  >  /etc/resolv.conf
 
     if [ -n "$(command -v apk)" ] ; then
         install curl sed gawk wget gzip xz tar virt-what
@@ -221,15 +235,26 @@ function chroot_run(){
 function replace_os(){
     mkdir /x/oldroot
     mount --bind / /x/oldroot
-    chroot_run 'cd /oldroot; '`
+    if chroot_run 'cd /oldroot; '`
         `'rm -rf $(ls /oldroot | grep -vE "(^dev|^proc|^sys|^run|^x)") ; '`
         `'cd /; '`
-        `'mv -f $(ls / | grep -vE "(^dev|^proc|^sys|^run|^oldroot)") /oldroot'
-    umount /x/oldroot
+        `'mv -f $(ls / | grep -vE "(^dev|^proc|^sys|^run|^oldroot)") /oldroot'; then
+        umount /x/oldroot
+    else
+        umount /x/oldroot 2>/dev/null
+        echo -e '\e[1;41mFATAL: replace_os failed. ABORT, DO NOT REBOOT. Old system intact.\e[m'
+        exit 1
+    fi
 }
 
 function post_install(){
     export PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+    # the new rootfs must be in place; otherwise we would silently "post
+    # install" the OLD system (the fake-success path that bricks machines)
+    [ -e /etc/alpine-release ] || [ -e /etc/debian_version ] || [ -e /etc/centos-release ] || {
+        echo -e '\e[1;41mFATAL: new rootfs not found at /. ABORT, DO NOT REBOOT.\e[m'
+        exit 1
+    }
     if [ -e /etc/alpine-release ] || grep -qi alpine /etc/issue 2>/dev/null; then
         echo -e '\e[1;32m[alpine] installing openssh / bash / ifupdown-ng ...\e[m'
         if ! apk add openssh bash ifupdown-ng; then
