@@ -235,20 +235,17 @@ function chroot_run(){
 }
 
 function replace_os(){
-    # host-view replacement WITHOUT bind mount. Order matters:
-    # 1) drop old /lib, move alpine's /lib in place so the musl loader can run
-    #    the busybox from /x (never delete tools before their replacement)
-    # 2) wipe remaining old top-level dirs using /x/bin/busybox (self-contained)
-    # 3) rename the rest of the new rootfs over in one busybox mv
-    rm -rf /lib /lib64 2>/dev/null
-    mv -f /x/lib /lib 2>/dev/null
-    B=/x/bin/busybox
+    # host-view replacement WITHOUT bind mount and WITHOUT relying on the old
+    # system's tools after deletion: run busybox through its own musl loader
+    # (direct binary path), so nothing on the old root is ever needed.
+    B="/x/lib/ld-musl-x86_64.so.1 /x/bin/busybox"
     $B rm -rf $($B ls / | $B grep -vE "(^dev|^proc|^sys|^run|^x)") 2>/dev/null
     $B mv -f $($B ls /x | $B grep -vE "^(dev|proc|sys|run)$") /
     [ -e /etc/os-release ] && [ -e /bin/sh ] && return 0
     echo -e '\e[1;41mFATAL: replace_os failed. ABORT, DO NOT REBOOT.\e[m'
     exit 1
 }
+
 
 
 
