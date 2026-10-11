@@ -235,24 +235,17 @@ function chroot_run(){
 }
 
 function replace_os(){
-    mkdir /x/oldroot
-    mount --bind / /x/oldroot
-    # purge leftover dirs of the same name first (e.g. an old /root makes
-    # busybox mv abort), then move the new rootfs over in ONE mv invocation:
-    # a per-item loop would exec /bin/mv again after /bin itself is moved
-    # away, killing every subsequent iteration.
-    if chroot_run 'cd /oldroot; '`
-        `'rm -rf $(ls /oldroot | grep -vE "(^dev|^proc|^sys|^run|^x)") ; '`
-        `'cd /; '`
-        `'for f in $(ls / | grep -vE "(^dev|^proc|^sys|^run|^oldroot)"); do rm -rf "/oldroot/$f" 2>/dev/null; done ; '`
-        `'mv -f $(ls / | grep -vE "(^dev|^proc|^sys|^run|^oldroot)") /oldroot'; then
-        umount /x/oldroot
-    else
-        umount /x/oldroot 2>/dev/null
-        echo -e '\e[1;41mFATAL: replace_os failed. ABORT, DO NOT REBOOT. Old system intact.\e[m'
-        exit 1
-    fi
+    # host-view replacement WITHOUT bind mount: some LXC images (EUServ
+    # CentOS template) refuse `mount --bind` inside the container. Wipe the
+    # old top-level dirs, then rename the new rootfs over in ONE mv
+    # (same filesystem -> instant rename). /x itself stays as the source.
+    rm -rf $(ls / | grep -vE "(^dev|^proc|^sys|^run|^x)") 2>/dev/null
+    mv -f $(ls /x | grep -vE "^(dev|proc|sys|run)$") /
+    [ -e /etc/os-release ] && [ -e /bin/sh ] && return 0
+    echo -e '\e[1;41mFATAL: replace_os failed. ABORT, DO NOT REBOOT.\e[m'
+    exit 1
 }
+
 
 function post_install(){
     export PATH="/usr/sbin:/usr/bin:/sbin:/bin"
