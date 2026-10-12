@@ -240,11 +240,13 @@ function replace_os(){
     # (direct binary path), so nothing on the old root is ever needed.
     B="/x/lib/ld-musl-x86_64.so.1 /x/bin/busybox"
     $B rm -rf $($B ls / | $B grep -vE "(^dev|^proc|^sys|^run|^x)") 2>/dev/null
-    $B mv -f $($B ls /x | $B grep -vE "^(dev|proc|sys|run)$") /
+    cd /x && $B mv -f $($B ls | $B grep -vE "^(dev|proc|sys|run)$") /
+    cd /
     [ -e /etc/os-release ] && [ -e /bin/sh ] && return 0
     echo -e '\e[1;41mFATAL: replace_os failed. ABORT, DO NOT REBOOT.\e[m'
     exit 1
 }
+
 
 
 
