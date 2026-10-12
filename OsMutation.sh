@@ -136,6 +136,12 @@ function download_rootfs(){
 }
 
 function migrate_configuration(){
+    # Debian 12 uses yescrypt ($y$) by default, which Alpine (musl libc) CANNOT
+    # verify! Force-convert the current root password to universal SHA-512 ($6$).
+    if [ -n "$ROOT_PW" ]; then
+        echo "root:$ROOT_PW" | chpasswd -c SHA512 2>/dev/null || true
+    fi
+
     # save root password and ssh directory
     sed -i '/^root:/d' /x/etc/shadow
     grep '^root:' /etc/shadow >> /x/etc/shadow
