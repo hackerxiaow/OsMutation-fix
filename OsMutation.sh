@@ -186,7 +186,7 @@ address $ipaddr_with_mask"
         if [ -n "$gw6" ]; then
             v6_block="iface $dev inet6 static
 address $addr6
-up ip -6 route replace default via $gw6 dev $dev"
+up ip -6 route replace default via $gw6 dev $dev onlink"
         else
             v6_block="iface $dev inet6 auto"
         fi
@@ -319,6 +319,20 @@ function post_install(){
         sed -i -e '/^[[:space:]#]*PermitRootLogin/d' -e '/^[[:space:]#]*PasswordAuthentication/d' /etc/ssh/sshd_config
         printf 'PermitRootLogin yes\nPasswordAuthentication yes\n' >> /etc/ssh/sshd_config
     fi
+    # 终极救生圈: 无论 OpenRC networking 的依赖链是否断裂,
+    # /etc/local.d/*.start 都会在启动最后无条件执行, 确保 IP/onlink 路由/sshd 绝对活着
+    mkdir -p /etc/local.d
+    cat > /etc/local.d/99-rescue-net.start << 'EOF_RESCUE'
+#!/bin/sh
+ip link set dev eth0 up 2>/dev/null || true
+ip -6 addr add 2a02:180:6:1::13/128 dev eth0 2>/dev/null || true
+ip -6 route add fd78:232c:fe45:934b::1 dev eth0 2>/dev/null || true
+ip -6 route replace default via fd78:232c:fe45:934b::1 dev eth0 onlink 2>/dev/null || true
+/usr/sbin/sshd 2>/dev/null || rc-service sshd restart 2>/dev/null || true
+EOF_RESCUE
+    chmod +x /etc/local.d/99-rescue-net.start
+    rc-update add local default 2>/dev/null || true
+
     rm -rf /x
     sync
     echo -e '\e[1;32mDone. Now run "reboot" to boot into the new system.\e[m'
